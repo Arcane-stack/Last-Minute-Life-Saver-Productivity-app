@@ -22,6 +22,7 @@ import com.example.network.SchedulingAgentOutput
 import com.example.network.TaskIntelligenceOutput
 import com.squareup.moshi.Types
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -29,6 +30,7 @@ import java.util.Date
 import java.util.Locale
 
 class LifesaverRepository(
+    private val context: android.content.Context,
     private val taskDao: TaskDao,
     private val scheduleBlockDao: ScheduleBlockDao,
     private val userProfileDao: UserProfileDao,
@@ -44,15 +46,36 @@ class LifesaverRepository(
 
     // --- Basic CRUD Operations ---
     suspend fun insertTask(task: Task): Long = withContext(Dispatchers.IO) {
-        taskDao.insertTask(task)
+        val id = taskDao.insertTask(task)
+        try {
+            val createdTask = task.copy(id = id.toInt())
+            com.example.notification.AlarmScheduler.scheduleAlarmsForTask(context, createdTask)
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to schedule alarm for inserted task", e)
+        }
+        id
     }
 
     suspend fun updateTask(task: Task) = withContext(Dispatchers.IO) {
         taskDao.updateTask(task)
+        try {
+            if (task.status == "COMPLETED") {
+                com.example.notification.AlarmScheduler.cancelAlarmsForTask(context, task.id)
+            } else {
+                com.example.notification.AlarmScheduler.scheduleAlarmsForTask(context, task)
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to update alarm status for task", e)
+        }
     }
 
     suspend fun deleteTaskById(id: Int) = withContext(Dispatchers.IO) {
         taskDao.deleteTaskById(id)
+        try {
+            com.example.notification.AlarmScheduler.cancelAlarmsForTask(context, id)
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to cancel alarm for deleted task", e)
+        }
     }
 
     suspend fun getTaskById(id: Int): Task? = withContext(Dispatchers.IO) {
@@ -69,6 +92,16 @@ class LifesaverRepository(
 
     suspend fun insertReminder(reminder: EscalatingReminder) = withContext(Dispatchers.IO) {
         reminderDao.insertReminder(reminder)
+        try {
+            com.example.notification.NotificationHelper.showNotification(
+                context,
+                "${reminder.level} Alarm: ${reminder.taskTitle}",
+                reminder.message,
+                reminder.taskId
+            )
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to show system notification", e)
+        }
     }
 
     suspend fun dismissReminder(id: Int) = withContext(Dispatchers.IO) {
@@ -81,6 +114,15 @@ class LifesaverRepository(
 
     // --- Helper to get API Key safely ---
     private fun getApiKey(): String {
+        try {
+            val sharedPrefs = context.getSharedPreferences("lifesaver_prefs", android.content.Context.MODE_PRIVATE)
+            val customKey = sharedPrefs.getString("gemini_api_key", null)
+            if (!customKey.isNullOrEmpty()) {
+                return customKey
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Error reading custom API key", e)
+        }
         val key = BuildConfig.GEMINI_API_KEY
         if (key.isEmpty() || key == "MY_GEMINI_API_KEY") {
             Log.e(tag, "Gemini API Key is missing or placeholder!")
@@ -88,11 +130,13 @@ class LifesaverRepository(
         return key
     }
 
-    // --- 1. Task Intelligence Agent ---
+        // --- 1. Task Intelligence Agent ---
     // Converts unstructured text/voice input into a fully structured Task
     suspend fun analyzeAndCaptureTask(rawInput: String, defaultDeadlineOffsetHours: Int = 24): Task? = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") return@withContext null
+        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
+            throw Exception("Gemini API Key is missing. Please configure your custom API Key in the Analytics / Settings tab.")
+        }
 
         val currentEpoch = System.currentTimeMillis()
         val formattedDate = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(currentEpoch))
@@ -127,11 +171,11 @@ class LifesaverRepository(
                     temperature = 0.2f
                 )
             )
-            val response = RetrofitClient.service.generateContent(apiKey, request)
-            val jsonText = response.firstText() ?: return@withContext null
+            val response = executeWithRetry { RetrofitClient.service.generateContent(apiKey, request) }
+            val jsonText = response.firstText() ?: throw Exception("Empty response received from Gemini API.")
 
             val adapter = RetrofitClient.moshiInstance.adapter(TaskIntelligenceOutput::class.java)
-            val output = adapter.fromJson(jsonText) ?: return@withContext null
+            val output = adapter.fromJson(jsonText) ?: throw Exception("Failed to parse Task Intelligence JSON.")
 
             // Calculate a default deadline if none was mentioned, or guess based on parsed info
             val calculatedDeadline = currentEpoch + (defaultDeadlineOffsetHours * 3600 * 1000)
@@ -154,15 +198,17 @@ class LifesaverRepository(
             )
         } catch (e: Exception) {
             Log.e(tag, "Error in Task Intelligence Agent", e)
-            return@withContext null
+            handleApiException(e)
         }
     }
 
-    // --- 2. Scheduling Agent ---
+        // --- 2. Scheduling Agent ---
     // Automatically schedules all active tasks into optimized time blocks
     suspend fun generateDailySchedule(): String? = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") return@withContext "API Key missing. Cannot schedule."
+        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
+            throw Exception("Gemini API Key is missing. Please configure your custom API Key in the Analytics / Settings tab.")
+        }
 
         val profile = getUserProfile() ?: UserProfile()
         val activeTasks = taskDao.getActiveTasks()
@@ -222,11 +268,11 @@ class LifesaverRepository(
                     temperature = 0.3f
                 )
             )
-            val response = RetrofitClient.service.generateContent(apiKey, request)
-            val jsonText = response.firstText() ?: return@withContext "Failed to get scheduling response."
+            val response = executeWithRetry { RetrofitClient.service.generateContent(apiKey, request) }
+            val jsonText = response.firstText() ?: throw Exception("Empty response received from Gemini API during scheduling.")
 
             val adapter = RetrofitClient.moshiInstance.adapter(SchedulingAgentOutput::class.java)
-            val output = adapter.fromJson(jsonText) ?: return@withContext "Failed to parse schedule."
+            val output = adapter.fromJson(jsonText) ?: throw Exception("Failed to parse daily schedule JSON.")
 
             // Save the newly generated schedule to DB
             scheduleBlockDao.clearAllBlocks()
@@ -250,7 +296,7 @@ class LifesaverRepository(
             return@withContext output.explanation
         } catch (e: Exception) {
             Log.e(tag, "Error in Scheduling Agent", e)
-            return@withContext "Scheduling error: ${e.message}"
+            handleApiException(e)
         }
     }
 
@@ -258,7 +304,9 @@ class LifesaverRepository(
     // Decides the absolute best single task to perform right now with clear mathematical scoring explanation
     suspend fun selectBestNextTask(): DecisionEngineOutput? = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") return@withContext null
+        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
+            throw Exception("Gemini API Key is missing. Please configure your custom API Key in the Analytics / Settings tab.")
+        }
 
         val activeTasks = taskDao.getActiveTasks()
         if (activeTasks.isEmpty()) return@withContext null
@@ -316,14 +364,14 @@ class LifesaverRepository(
                     temperature = 0.2f
                 )
             )
-            val response = RetrofitClient.service.generateContent(apiKey, request)
-            val jsonText = response.firstText() ?: return@withContext null
+            val response = executeWithRetry { RetrofitClient.service.generateContent(apiKey, request) }
+            val jsonText = response.firstText() ?: throw Exception("Empty response received from Gemini API during task selection.")
 
             val adapter = RetrofitClient.moshiInstance.adapter(DecisionEngineOutput::class.java)
-            return@withContext adapter.fromJson(jsonText)
+            return@withContext adapter.fromJson(jsonText) ?: throw Exception("Failed to parse Decision Engine JSON.")
         } catch (e: Exception) {
             Log.e(tag, "Error in Decision Engine Agent", e)
-            return@withContext null
+            handleApiException(e)
         }
     }
 
@@ -331,9 +379,11 @@ class LifesaverRepository(
     // If a deadline is close and incomplete, break task into micro-steps, generate emergency execution plan, and reorganize schedule
     suspend fun activateDeadlineRescueMode(taskId: Int): RescueModeOutput? = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") return@withContext null
+        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
+            throw Exception("Gemini API Key is missing. Please configure your custom API Key in the Analytics / Settings tab.")
+        }
 
-        val task = taskDao.getTaskById(taskId) ?: return@withContext null
+        val task = taskDao.getTaskById(taskId) ?: throw Exception("Task with ID $taskId not found.")
         val profile = getUserProfile() ?: UserProfile()
         val currentEpoch = System.currentTimeMillis()
         val formattedDate = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(currentEpoch))
@@ -376,11 +426,11 @@ class LifesaverRepository(
                     temperature = 0.2f
                 )
             )
-            val response = RetrofitClient.service.generateContent(apiKey, request)
-            val jsonText = response.firstText() ?: return@withContext null
+            val response = executeWithRetry { RetrofitClient.service.generateContent(apiKey, request) }
+            val jsonText = response.firstText() ?: throw Exception("Empty response received from Gemini API during rescue mode.")
 
             val adapter = RetrofitClient.moshiInstance.adapter(RescueModeOutput::class.java)
-            val output = adapter.fromJson(jsonText) ?: return@withContext null
+            val output = adapter.fromJson(jsonText) ?: throw Exception("Failed to parse Rescue Mode JSON.")
 
             // 1. Update the Task with new microsteps and mark emergency generated
             val microStepsList = output.micro_steps.map { MicroStep(title = it, isCompleted = false) }
@@ -424,7 +474,50 @@ class LifesaverRepository(
             return@withContext output
         } catch (e: Exception) {
             Log.e(tag, "Error in Emergency Rescue Mode", e)
-            return@withContext null
+            handleApiException(e)
         }
+    }
+
+    private suspend fun <T> executeWithRetry(
+        maxRetries: Int = 3,
+        initialDelayMillis: Long = 2000L,
+        block: suspend () -> T
+    ): T {
+        var currentDelay = initialDelayMillis
+        for (attempt in 1..maxRetries) {
+            try {
+                return block()
+            } catch (e: Exception) {
+                val isRateLimit = (e is retrofit2.HttpException && e.code() == 429) ||
+                        (e.message?.contains("429") == true)
+
+                if (isRateLimit && attempt < maxRetries) {
+                    Log.w(tag, "Rate limit hit (429). Retrying in ${currentDelay}ms (Attempt $attempt/$maxRetries)...")
+                    delay(currentDelay)
+                    currentDelay *= 2 // Exponential backoff
+                } else {
+                    throw e
+                }
+            }
+        }
+        throw Exception("Failed after maximum retries")
+    }
+
+    private fun handleApiException(e: Exception): Nothing {
+        if (e is retrofit2.HttpException) {
+            val code = e.code()
+            if (code == 429) {
+                throw Exception("API Rate Limit Exceeded (HTTP 429). The free-tier Gemini API is limited to 15 requests per minute. Please wait 10-15 seconds and try again.")
+            } else if (code == 400) {
+                throw Exception("Bad Request (HTTP 400) from Gemini API. The prompt format or model configuration might be unsupported.")
+            } else if (code == 403) {
+                throw Exception("Access Forbidden (HTTP 403). Your Gemini API key is invalid, lacks permissions, or has expired. Please check your key in the Settings/Analytics tab.")
+            } else if (code == 404) {
+                throw Exception("Endpoint Not Found (HTTP 404). The requested model or API version is unavailable.")
+            } else {
+                throw Exception("Gemini API Error (HTTP $code): ${e.message()}")
+            }
+        }
+        throw e
     }
 }

@@ -55,41 +55,41 @@ data class GenerateContentResponse(
 
 @JsonClass(generateAdapter = true)
 data class TaskIntelligenceOutput(
-    val title: String,
-    val description: String,
-    val estimated_time_minutes: Int,
-    val energy_required: String, // HIGH, MEDIUM, LOW
-    val priority_score: Double, // 1.0 to 10.0
-    val micro_steps: List<String>
+    val title: String = "",
+    val description: String = "",
+    val estimated_time_minutes: Int = 30,
+    val energy_required: String = "MEDIUM", // HIGH, MEDIUM, LOW
+    val priority_score: Double = 5.0, // 1.0 to 10.0
+    val micro_steps: List<String> = emptyList()
 )
 
 @JsonClass(generateAdapter = true)
 data class ScheduledItemOutput(
-    val title: String,
-    val start_offset_minutes: Int, // Minutes from the reference start time
-    val duration_minutes: Int,
-    val label: String // "Focus Work", "Break Activity", "Adaptive Buffer"
+    val title: String = "",
+    val start_offset_minutes: Int = 0, // Minutes from the reference start time
+    val duration_minutes: Int = 15,
+    val label: String = "Focus Work" // "Focus Work", "Break Activity", "Adaptive Buffer"
 )
 
 @JsonClass(generateAdapter = true)
 data class SchedulingAgentOutput(
-    val schedule: List<ScheduledItemOutput>,
-    val explanation: String
+    val schedule: List<ScheduledItemOutput> = emptyList(),
+    val explanation: String = ""
 )
 
 @JsonClass(generateAdapter = true)
 data class DecisionEngineOutput(
-    val task_id: Int,
-    val reasoning: String,
-    val focus_session_minutes: Int, // AI Decided pomodoro session length (15-90 mins)
-    val recommended_break_activity: String
+    val task_id: Int = -1,
+    val reasoning: String = "",
+    val focus_session_minutes: Int = 25, // AI Decided pomodoro session length (15-90 mins)
+    val recommended_break_activity: String = "Take a short break"
 )
 
 @JsonClass(generateAdapter = true)
 data class RescueModeOutput(
-    val micro_steps: List<String>,
-    val emergency_execution_plan: String,
-    val updated_schedule: List<ScheduledItemOutput>
+    val micro_steps: List<String> = emptyList(),
+    val emergency_execution_plan: String = "",
+    val updated_schedule: List<ScheduledItemOutput> = emptyList()
 )
 
 // --- Retrofit API Service ---

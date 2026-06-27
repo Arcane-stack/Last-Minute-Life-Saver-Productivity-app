@@ -49,11 +49,74 @@ import com.example.viewmodel.LifesaverViewModel
 import java.text.SimpleDateFormat
 import java.util.*
 
+fun showDateTimePicker(
+    context: android.content.Context,
+    initialEpochMillis: Long = System.currentTimeMillis(),
+    onDateTimeSelected: (Long) -> Unit
+) {
+    val calendar = Calendar.getInstance().apply { timeInMillis = initialEpochMillis }
+    val datePickerDialog = android.app.DatePickerDialog(
+        context,
+        { _, year, month, dayOfMonth ->
+            calendar.set(Calendar.YEAR, year)
+            calendar.set(Calendar.MONTH, month)
+            calendar.set(Calendar.DAY_OF_MONTH, dayOfMonth)
+            
+            val timePickerDialog = android.app.TimePickerDialog(
+                context,
+                { _, hourOfDay, minute ->
+                    calendar.set(Calendar.HOUR_OF_DAY, hourOfDay)
+                    calendar.set(Calendar.MINUTE, minute)
+                    calendar.set(Calendar.SECOND, 0)
+                    calendar.set(Calendar.MILLISECOND, 0)
+                    onDateTimeSelected(calendar.timeInMillis)
+                },
+                calendar.get(Calendar.HOUR_OF_DAY),
+                calendar.get(Calendar.MINUTE),
+                true
+            )
+            timePickerDialog.show()
+        },
+        calendar.get(Calendar.YEAR),
+        calendar.get(Calendar.MONTH),
+        calendar.get(Calendar.DAY_OF_MONTH)
+    )
+    datePickerDialog.show()
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LifesaverApp(viewModel: LifesaverViewModel) {
     val context = LocalContext.current
     var currentTab by remember { mutableStateOf(0) }
+
+    val calendarPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            viewModel.setCalendarPermissionSimulated(true)
+            Toast.makeText(context, "Google Calendar Connected!", Toast.LENGTH_SHORT).show()
+        } else {
+            viewModel.setCalendarPermissionSimulated(false)
+            Toast.makeText(context, "Calendar Sync Turned Off. (Real permission denied)", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        viewModel.setNotificationPermissionSimulated(isGranted)
+        if (isGranted) {
+            Toast.makeText(context, "Alarms & Notifications Enabled!", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "Notification permission is required for background alerts.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.checkAndLoadCalendar()
+        viewModel.checkNotificationPermission()
+    }
 
     val systemMessage by viewModel.systemMessage.collectAsState()
     LaunchedEffect(systemMessage) {
@@ -119,7 +182,20 @@ fun LifesaverApp(viewModel: LifesaverViewModel) {
                     0 -> DashboardTab(viewModel) { currentTab = 2 } // Navigate to Focus Room
                     1 -> TasksTab(viewModel)
                     2 -> FocusRoomTab(viewModel)
-                    3 -> AnalyticsTab(viewModel)
+                    3 -> AnalyticsTab(
+                        viewModel = viewModel,
+                        onRequestCalendarPermission = {
+                            calendarPermissionLauncher.launch("android.permission.READ_CALENDAR")
+                        },
+                        onRequestNotificationPermission = {
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                                notificationPermissionLauncher.launch("android.permission.POST_NOTIFICATIONS")
+                            } else {
+                                viewModel.setNotificationPermissionSimulated(true)
+                                Toast.makeText(context, "Notifications Enabled!", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    )
                 }
             }
         }
@@ -523,45 +599,6 @@ fun DashboardTab(viewModel: LifesaverViewModel, onNavigateToFocus: () -> Unit) {
                 }
             }
         }
-
-        // Mock escalation panel for live testing
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                colors = CardDefaults.cardColors(containerColor = SleekCardBg),
-                border = BorderStroke(1.dp, SleekCardBorder),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Text(
-                        text = "PROACTIVE ALARM SIMULATOR",
-                        color = SleekMutedText,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        TextButton(onClick = { viewModel.triggerMockEscalation("GENTLE") }) {
-                            Text("Gentle", color = FocusBlue, fontWeight = FontWeight.Bold)
-                        }
-                        TextButton(onClick = { viewModel.triggerMockEscalation("SUGGESTION") }) {
-                            Text("Suggest", color = AmberYellow, fontWeight = FontWeight.Bold)
-                        }
-                        TextButton(onClick = { viewModel.triggerMockEscalation("URGENT") }) {
-                            Text("Urgent", color = SafetyRed, fontWeight = FontWeight.Bold)
-                        }
-                        TextButton(onClick = { viewModel.triggerMockEscalation("RESCUE") }) {
-                            Text("Rescue", color = SleekPrimary, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -570,6 +607,7 @@ fun DashboardTab(viewModel: LifesaverViewModel, onNavigateToFocus: () -> Unit) {
 @Composable
 fun TasksTab(viewModel: LifesaverViewModel) {
     var rawInputText by remember { mutableStateOf("") }
+    var showAddManualDialog by remember { mutableStateOf(false) }
     val tasks by viewModel.tasksState.collectAsState()
     val isAnalyzingTask by viewModel.isAnalyzingTask.collectAsState()
 
@@ -684,7 +722,193 @@ fun TasksTab(viewModel: LifesaverViewModel) {
                             Icon(Icons.Default.AddComment, contentDescription = "Load Preset", tint = FocusBlue)
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    OutlinedButton(
+                        onClick = { showAddManualDialog = true },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = FocusBlue),
+                        border = BorderStroke(1.dp, FocusBlue),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "Add Manually")
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Or Add Task Manually")
+                    }
                 }
+            }
+        }
+
+        if (showAddManualDialog) {
+            item {
+                var title by remember { mutableStateOf("") }
+                var description by remember { mutableStateOf("") }
+                var priority by remember { mutableStateOf(5.0) } // Default 5.0
+                var estMinutes by remember { mutableStateOf("30") }
+                var energy by remember { mutableStateOf("MEDIUM") } // HIGH, MEDIUM, LOW
+                
+                // Real-time Date & Time state
+                var selectedDeadlineMillis by remember { mutableStateOf(System.currentTimeMillis() + 2 * 3600 * 1000) }
+                val contextForPicker = LocalContext.current
+                val dateFormatter = remember { SimpleDateFormat("EEEE, MMM d, yyyy 'at' HH:mm", Locale.getDefault()) }
+
+                AlertDialog(
+                    onDismissRequest = { showAddManualDialog = false },
+                    title = { Text("Add Task Manually", fontWeight = FontWeight.Bold, color = SoftWhite) },
+                    text = {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = title,
+                                onValueChange = { title = it },
+                                label = { Text("Task Title") },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = RescueOrange,
+                                    unfocusedBorderColor = LighterSlate,
+                                    focusedLabelColor = RescueOrange,
+                                    unfocusedLabelColor = MutedText
+                                )
+                            )
+                            OutlinedTextField(
+                                value = description,
+                                onValueChange = { description = it },
+                                label = { Text("Description") },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = RescueOrange,
+                                    unfocusedBorderColor = LighterSlate,
+                                    focusedLabelColor = RescueOrange,
+                                    unfocusedLabelColor = MutedText
+                                )
+                            )
+                            
+                            // Priority Score selection using Slider
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Task Priority Index:", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                    Text(String.format(Locale.US, "%.1f", priority), color = RescueOrange, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                                }
+                                Slider(
+                                    value = priority.toFloat(),
+                                    onValueChange = { priority = it.toDouble() },
+                                    valueRange = 1f..10f,
+                                    steps = 90, // increments of 0.1
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = RescueOrange,
+                                        activeTrackColor = RescueOrange,
+                                        inactiveTrackColor = LighterSlate
+                                    )
+                                )
+                            }
+
+                            // Estimated minutes (Number Field)
+                            OutlinedTextField(
+                                value = estMinutes,
+                                onValueChange = { estMinutes = it.filter { char -> char.isDigit() } },
+                                label = { Text("Estimated Duration (Minutes)") },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = RescueOrange,
+                                    unfocusedBorderColor = LighterSlate,
+                                    focusedLabelColor = RescueOrange,
+                                    unfocusedLabelColor = MutedText
+                                )
+                            )
+
+                            // Energy Required drop-down / row of choice
+                            Column {
+                                Text("Energy Required:", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    listOf("LOW", "MEDIUM", "HIGH").forEach { level ->
+                                        val isSelected = energy == level
+                                        OutlinedButton(
+                                            onClick = { energy = level },
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                containerColor = if (isSelected) FocusBlue.copy(alpha = 0.15f) else Color.Transparent,
+                                                contentColor = if (isSelected) FocusBlue else MutedText
+                                            ),
+                                            border = BorderStroke(1.dp, if (isSelected) FocusBlue else LighterSlate),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text(level, style = MaterialTheme.typography.bodySmall)
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Visual Calendar & Clock deadline selector
+                            Column {
+                                Text("Task Deadline / Due Date:", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(LighterSlate.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                        .border(1.dp, LighterSlate, RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            showDateTimePicker(contextForPicker, selectedDeadlineMillis) {
+                                                selectedDeadlineMillis = it
+                                            }
+                                        }
+                                        .padding(12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = dateFormatter.format(Date(selectedDeadlineMillis)),
+                                            color = SoftWhite,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.CalendarToday,
+                                        contentDescription = "Open Calendar",
+                                        tint = RescueOrange,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                if (title.isNotBlank()) {
+                                    viewModel.addNewTaskDetailed(
+                                        title = title,
+                                        description = description,
+                                        deadlineMillis = selectedDeadlineMillis,
+                                        energyRequired = energy,
+                                        priority = priority,
+                                        estimatedMinutes = estMinutes.toIntOrNull() ?: 30
+                                    )
+                                    showAddManualDialog = false
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = RescueOrange)
+                        ) {
+                            Text("Add Task", color = Color.White)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showAddManualDialog = false }) {
+                            Text("Cancel", color = MutedText)
+                        }
+                    },
+                    containerColor = SlateCard
+                )
             }
         }
 
@@ -723,6 +947,7 @@ fun TasksTab(viewModel: LifesaverViewModel) {
 @Composable
 fun TaskCard(task: Task, viewModel: LifesaverViewModel) {
     var expanded by remember { mutableStateOf(false) }
+    var showEditDialog by remember { mutableStateOf(false) }
     val steps = viewModel.getMicroSteps(task)
 
     val currentEpoch = System.currentTimeMillis()
@@ -878,11 +1103,18 @@ fun TaskCard(task: Task, viewModel: LifesaverViewModel) {
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Delete Task
-                        IconButton(onClick = { viewModel.deleteTask(task.id) }) {
-                            Icon(Icons.Default.Delete, contentDescription = "Delete task", tint = SafetyRed)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            // Delete Task
+                            IconButton(onClick = { viewModel.deleteTask(task.id) }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Delete task", tint = SafetyRed)
+                            }
+                            // Edit Task
+                            IconButton(onClick = { showEditDialog = true }) {
+                                Icon(Icons.Default.Edit, contentDescription = "Edit task", tint = FocusBlue)
+                            }
                         }
 
                         // Smart Rescue trigger
@@ -896,6 +1128,177 @@ fun TaskCard(task: Task, viewModel: LifesaverViewModel) {
                                 Text("Deadline Rescue", color = Color.White)
                             }
                         }
+                    }
+
+                    if (showEditDialog) {
+                        var editTitle by remember { mutableStateOf(task.title) }
+                        var editDescription by remember { mutableStateOf(task.description) }
+                        var editPriority by remember { mutableStateOf(task.priorityScore) }
+                        var editEstMinutes by remember { mutableStateOf(task.estimatedTimeMinutes.toString()) }
+                        var editEnergy by remember { mutableStateOf(task.energyRequired) }
+                        
+                        var editDeadlineMillis by remember { mutableStateOf(task.deadline) }
+                        val contextForPicker = LocalContext.current
+                        val dateFormatter = remember { SimpleDateFormat("EEEE, MMM d, yyyy 'at' HH:mm", Locale.getDefault()) }
+
+                        AlertDialog(
+                            onDismissRequest = { showEditDialog = false },
+                            title = { Text("Edit Task Details", fontWeight = FontWeight.Bold, color = SoftWhite) },
+                            text = {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    OutlinedTextField(
+                                        value = editTitle,
+                                        onValueChange = { editTitle = it },
+                                        label = { Text("Task Title") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = RescueOrange,
+                                            unfocusedBorderColor = LighterSlate,
+                                            focusedLabelColor = RescueOrange,
+                                            unfocusedLabelColor = MutedText
+                                        )
+                                    )
+                                    OutlinedTextField(
+                                        value = editDescription,
+                                        onValueChange = { editDescription = it },
+                                        label = { Text("Description") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = RescueOrange,
+                                            unfocusedBorderColor = LighterSlate,
+                                            focusedLabelColor = RescueOrange,
+                                            unfocusedLabelColor = MutedText
+                                        )
+                                    )
+                                    
+                                    // Priority Score selection using Slider
+                                    Column {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text("Task Priority Index:", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                            Text(String.format(Locale.US, "%.1f", editPriority), color = RescueOrange, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                                        }
+                                        Slider(
+                                            value = editPriority.toFloat(),
+                                            onValueChange = { editPriority = it.toDouble() },
+                                            valueRange = 1f..10f,
+                                            steps = 90, // increments of 0.1
+                                            colors = SliderDefaults.colors(
+                                                thumbColor = RescueOrange,
+                                                activeTrackColor = RescueOrange,
+                                                inactiveTrackColor = LighterSlate
+                                            )
+                                        )
+                                    }
+
+                                    // Estimated minutes
+                                    OutlinedTextField(
+                                        value = editEstMinutes,
+                                        onValueChange = { editEstMinutes = it.filter { char -> char.isDigit() } },
+                                        label = { Text("Estimated Duration (Minutes)") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = RescueOrange,
+                                            unfocusedBorderColor = LighterSlate,
+                                            focusedLabelColor = RescueOrange,
+                                            unfocusedLabelColor = MutedText
+                                        )
+                                    )
+
+                                    // Energy Required choice
+                                    Column {
+                                        Text("Energy Required:", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            listOf("LOW", "MEDIUM", "HIGH").forEach { level ->
+                                                val isSelected = editEnergy == level
+                                                OutlinedButton(
+                                                    onClick = { editEnergy = level },
+                                                    colors = ButtonDefaults.outlinedButtonColors(
+                                                        containerColor = if (isSelected) FocusBlue.copy(alpha = 0.15f) else Color.Transparent,
+                                                        contentColor = if (isSelected) FocusBlue else MutedText
+                                                    ),
+                                                    border = BorderStroke(1.dp, if (isSelected) FocusBlue else LighterSlate),
+                                                    modifier = Modifier.weight(1f)
+                                                ) {
+                                                    Text(level, style = MaterialTheme.typography.bodySmall)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Visual Calendar & Clock deadline selector
+                                    Column {
+                                        Text("Task Deadline / Due Date:", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .background(LighterSlate.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                                .border(1.dp, LighterSlate, RoundedCornerShape(8.dp))
+                                                .clickable {
+                                                    showDateTimePicker(contextForPicker, editDeadlineMillis) {
+                                                        editDeadlineMillis = it
+                                                    }
+                                                }
+                                                .padding(12.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = dateFormatter.format(Date(editDeadlineMillis)),
+                                                    color = SoftWhite,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                            Icon(
+                                                imageVector = Icons.Default.CalendarToday,
+                                                contentDescription = "Open Calendar",
+                                                tint = RescueOrange,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                Button(
+                                    onClick = {
+                                        if (editTitle.isNotBlank()) {
+                                            viewModel.updateTaskDetails(
+                                                taskId = task.id,
+                                                title = editTitle,
+                                                description = editDescription,
+                                                priority = editPriority,
+                                                estimatedMinutes = editEstMinutes.toIntOrNull() ?: task.estimatedTimeMinutes,
+                                                energyRequired = editEnergy,
+                                                deadlineMillis = editDeadlineMillis
+                                            )
+                                            showEditDialog = false
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = RescueOrange)
+                                ) {
+                                    Text("Save Changes", color = Color.White)
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showEditDialog = false }) {
+                                    Text("Cancel", color = MutedText)
+                                }
+                            },
+                            containerColor = SlateCard
+                        )
                     }
                 }
             }
@@ -1068,12 +1471,25 @@ fun FocusRoomTab(viewModel: LifesaverViewModel) {
 // --- TAB 4: ANALYTICS & SETTINGS ---
 
 @Composable
-fun AnalyticsTab(viewModel: LifesaverViewModel) {
+fun AnalyticsTab(
+    viewModel: LifesaverViewModel,
+    onRequestCalendarPermission: () -> Unit,
+    onRequestNotificationPermission: () -> Unit
+) {
     val tasks by viewModel.tasksState.collectAsState()
     val userProfile by viewModel.userProfileState.collectAsState()
 
+    val calendarEvents by viewModel.calendarEvents.collectAsState()
+    val hasCalendarPermission by viewModel.hasCalendarPermission.collectAsState()
+    val hasNotificationPermission by viewModel.hasNotificationPermission.collectAsState()
+
     val completedTasks = tasks.filter { it.status == "COMPLETED" }
     val incompleteTasks = tasks.filter { it.status != "COMPLETED" }
+
+    var showAddEventDialog by remember { mutableStateOf(false) }
+    var selectedEventToImport by remember { mutableStateOf<com.example.data.GoogleCalendarEvent?>(null) }
+    var selectedCalendarDate by remember { mutableStateOf(Date()) }
+    var currentMonthCalendarState by remember { mutableStateOf(Calendar.getInstance()) }
 
     val currentEpoch = System.currentTimeMillis()
     val overdueTasks = incompleteTasks.filter { it.deadline < currentEpoch }
@@ -1289,6 +1705,8 @@ fun AnalyticsTab(viewModel: LifesaverViewModel) {
 
         // Integration Sync details
         item {
+            val dateFormat = remember { SimpleDateFormat("EEEE, MMM d 'at' HH:mm", Locale.getDefault()) }
+
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = SlateCard),
@@ -1301,22 +1719,683 @@ fun AnalyticsTab(viewModel: LifesaverViewModel) {
                         fontWeight = FontWeight.Bold,
                         style = MaterialTheme.typography.labelSmall
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // 1. Google Calendar Integration Section
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(LighterSlate.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                            .border(1.dp, LighterSlate, RoundedCornerShape(12.dp))
+                            .padding(12.dp)
                     ) {
-                        Row {
-                            Icon(Icons.Default.Sync, contentDescription = "Calendar", tint = MutedText)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Google Calendar & Email Sync", color = SoftWhite, style = MaterialTheme.typography.bodySmall)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.CalendarToday,
+                                    contentDescription = "Calendar",
+                                    tint = FocusBlue,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        "Google Calendar Sync",
+                                        color = SoftWhite,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        if (hasCalendarPermission) "Connected" else "Disconnected",
+                                        color = if (hasCalendarPermission) SuccessGreen else MutedText,
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = hasCalendarPermission,
+                                onCheckedChange = { checked ->
+                                    if (checked) {
+                                        onRequestCalendarPermission()
+                                    } else {
+                                        viewModel.setCalendarPermissionSimulated(false)
+                                    }
+                                },
+                                colors = SwitchDefaults.colors(checkedThumbColor = FocusBlue)
+                            )
                         }
-                        Switch(checked = true, onCheckedChange = {}, colors = SwitchDefaults.colors(checkedThumbColor = FocusBlue))
+
+                        if (hasCalendarPermission) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            HorizontalDivider(color = LighterSlate.copy(alpha = 0.5f))
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // Month Selector Header
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(
+                                    onClick = {
+                                        val prev = (currentMonthCalendarState.clone() as Calendar).apply { add(Calendar.MONTH, -1) }
+                                        currentMonthCalendarState = prev
+                                        selectedCalendarDate = prev.apply { set(Calendar.DAY_OF_MONTH, 1) }.time
+                                    }
+                                ) {
+                                    Icon(Icons.Default.ArrowBack, contentDescription = "Previous Month", tint = SoftWhite)
+                                }
+
+                                Text(
+                                    text = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(currentMonthCalendarState.time),
+                                    color = SoftWhite,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+
+                                IconButton(
+                                    onClick = {
+                                        val next = (currentMonthCalendarState.clone() as Calendar).apply { add(Calendar.MONTH, 1) }
+                                        currentMonthCalendarState = next
+                                        selectedCalendarDate = next.apply { set(Calendar.DAY_OF_MONTH, 1) }.time
+                                    }
+                                ) {
+                                    Icon(Icons.Default.ArrowForward, contentDescription = "Next Month", tint = SoftWhite)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // Weekday Headings (S, M, T, W, T, F, S)
+                            val weekdays = listOf("S", "M", "T", "W", "T", "F", "S")
+                            Row(modifier = Modifier.fillMaxWidth()) {
+                                weekdays.forEach { dayName ->
+                                    Text(
+                                        text = dayName,
+                                        modifier = Modifier.weight(1f),
+                                        textAlign = TextAlign.Center,
+                                        color = MutedText,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            // Calculate Days List for the selected month
+                            val monthStart = (currentMonthCalendarState.clone() as Calendar).apply { set(Calendar.DAY_OF_MONTH, 1) }
+                            val firstDayOfWeek = monthStart.get(Calendar.DAY_OF_WEEK)
+                            val maxDays = currentMonthCalendarState.getActualMaximum(Calendar.DAY_OF_MONTH)
+
+                            val daysList = remember(currentMonthCalendarState) {
+                                val list = mutableListOf<Date?>()
+                                for (i in 1 until firstDayOfWeek) {
+                                    list.add(null)
+                                }
+                                for (i in 1..maxDays) {
+                                    val dayCal = monthStart.clone() as Calendar
+                                    dayCal.set(Calendar.DAY_OF_MONTH, i)
+                                    list.add(dayCal.time)
+                                }
+                                while (list.size % 7 != 0) {
+                                    list.add(null)
+                                }
+                                list
+                            }
+
+                            // Days Grid in Rows
+                            val chunkedDays = daysList.chunked(7)
+                            chunkedDays.forEach { week ->
+                                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    week.forEach { date ->
+                                        if (date != null) {
+                                            val dayCal = Calendar.getInstance().apply { time = date }
+                                            val dayNum = dayCal.get(Calendar.DAY_OF_MONTH)
+
+                                            val isSelected = remember(selectedCalendarDate, date) {
+                                                val selCal = Calendar.getInstance().apply { time = selectedCalendarDate }
+                                                selCal.get(Calendar.YEAR) == dayCal.get(Calendar.YEAR) &&
+                                                selCal.get(Calendar.MONTH) == dayCal.get(Calendar.MONTH) &&
+                                                selCal.get(Calendar.DAY_OF_MONTH) == dayNum
+                                            }
+
+                                            val isToday = remember(date) {
+                                                val todayCal = Calendar.getInstance()
+                                                todayCal.get(Calendar.YEAR) == dayCal.get(Calendar.YEAR) &&
+                                                todayCal.get(Calendar.MONTH) == dayCal.get(Calendar.MONTH) &&
+                                                todayCal.get(Calendar.DAY_OF_MONTH) == dayNum
+                                            }
+
+                                            val dayHasEvents = remember(calendarEvents, date) {
+                                                val dY = dayCal.get(Calendar.YEAR)
+                                                val dM = dayCal.get(Calendar.MONTH)
+                                                val dD = dayNum
+                                                calendarEvents.any { event ->
+                                                    val eventCal = Calendar.getInstance().apply { timeInMillis = event.startMillis }
+                                                    eventCal.get(Calendar.YEAR) == dY &&
+                                                    eventCal.get(Calendar.MONTH) == dM &&
+                                                    eventCal.get(Calendar.DAY_OF_MONTH) == dD
+                                                }
+                                            }
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .aspectRatio(1f)
+                                                    .padding(2.dp)
+                                                    .clip(CircleShape)
+                                                    .background(
+                                                        when {
+                                                            isSelected -> FocusBlue
+                                                            isToday -> FocusBlue.copy(alpha = 0.2f)
+                                                            else -> Color.Transparent
+                                                        }
+                                                    )
+                                                    .border(
+                                                        width = if (isToday && !isSelected) 1.dp else 0.dp,
+                                                        color = if (isToday && !isSelected) FocusBlue else Color.Transparent,
+                                                        shape = CircleShape
+                                                    )
+                                                    .clickable {
+                                                        selectedCalendarDate = date
+                                                    },
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                    Text(
+                                                        text = dayNum.toString(),
+                                                        color = if (isSelected) Color.White else SoftWhite,
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                    if (dayHasEvents) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .size(4.dp)
+                                                                .clip(CircleShape)
+                                                                .background(if (isSelected) Color.White else AmberYellow)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            Spacer(modifier = Modifier.weight(1f).aspectRatio(1f))
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+                            HorizontalDivider(color = LighterSlate.copy(alpha = 0.5f))
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // Selected date details & Add event button
+                            val selFormat = remember { SimpleDateFormat("MMM d, yyyy", Locale.getDefault()) }
+                            val eventsOnSelectedDate = remember(calendarEvents, selectedCalendarDate) {
+                                val selCal = Calendar.getInstance().apply { time = selectedCalendarDate }
+                                val sY = selCal.get(Calendar.YEAR)
+                                val sM = selCal.get(Calendar.MONTH)
+                                val sD = selCal.get(Calendar.DAY_OF_MONTH)
+                                calendarEvents.filter { event ->
+                                    val eventCal = Calendar.getInstance().apply { timeInMillis = event.startMillis }
+                                    eventCal.get(Calendar.YEAR) == sY &&
+                                    eventCal.get(Calendar.MONTH) == sM &&
+                                    eventCal.get(Calendar.DAY_OF_MONTH) == sD
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Events on ${selFormat.format(selectedCalendarDate)}:",
+                                    color = MutedText,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+
+                                OutlinedButton(
+                                    onClick = { showAddEventDialog = true },
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = FocusBlue),
+                                    border = BorderStroke(1.dp, FocusBlue),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(30.dp)
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = "Add Event", modifier = Modifier.size(12.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Add Event", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            if (eventsOnSelectedDate.isEmpty()) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(LighterSlate.copy(alpha = 0.15f), RoundedCornerShape(8.dp))
+                                        .padding(12.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "No events scheduled for this day.",
+                                        color = MutedText,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            } else {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    eventsOnSelectedDate.forEach { event ->
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            colors = CardDefaults.cardColors(containerColor = SlateCard),
+                                            border = BorderStroke(1.dp, LighterSlate.copy(alpha = 0.8f))
+                                        ) {
+                                            Column(modifier = Modifier.padding(10.dp)) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(
+                                                            text = event.calendarName ?: "Google Calendar",
+                                                            color = FocusBlue,
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontWeight = FontWeight.SemiBold
+                                                        )
+                                                        Text(
+                                                            text = event.title,
+                                                            color = SoftWhite,
+                                                            style = MaterialTheme.typography.bodyMedium,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                        Text(
+                                                            text = SimpleDateFormat("EEEE, hh:mm a", Locale.getDefault()).format(Date(event.startMillis)),
+                                                            color = AmberYellow,
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                    IconButton(
+                                                        onClick = {
+                                                            selectedEventToImport = event
+                                                        },
+                                                        modifier = Modifier
+                                                            .background(FocusBlue.copy(alpha = 0.1f), CircleShape)
+                                                            .size(36.dp)
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Default.Add,
+                                                            contentDescription = "Import Event",
+                                                            tint = FocusBlue,
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                    }
+                                                }
+                                                if (!event.description.isNullOrBlank()) {
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    Text(
+                                                        text = event.description,
+                                                        color = MutedText,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        maxLines = 2
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // Dialog 1: Add Event to Google Calendar Dialog
+                    if (showAddEventDialog) {
+                        var newEventTitle by remember { mutableStateOf("") }
+                        var newEventDesc by remember { mutableStateOf("") }
+                        var newEventTime by remember {
+                            mutableStateOf(
+                                Calendar.getInstance().apply {
+                                    time = selectedCalendarDate
+                                    set(Calendar.HOUR_OF_DAY, 12)
+                                    set(Calendar.MINUTE, 0)
+                                    set(Calendar.SECOND, 0)
+                                    set(Calendar.MILLISECOND, 0)
+                                }.timeInMillis
+                            )
+                        }
+                        val contextForPicker = LocalContext.current
+
+                        AlertDialog(
+                            onDismissRequest = { showAddEventDialog = false },
+                            title = { Text("Add Google Calendar Event", fontWeight = FontWeight.Bold, color = SoftWhite) },
+                            text = {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    OutlinedTextField(
+                                        value = newEventTitle,
+                                        onValueChange = { newEventTitle = it },
+                                        label = { Text("Event Title") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = FocusBlue,
+                                            unfocusedBorderColor = LighterSlate,
+                                            focusedLabelColor = FocusBlue,
+                                            unfocusedLabelColor = MutedText
+                                        )
+                                    )
+                                    OutlinedTextField(
+                                        value = newEventDesc,
+                                        onValueChange = { newEventDesc = it },
+                                        label = { Text("Event Description") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = FocusBlue,
+                                            unfocusedBorderColor = LighterSlate,
+                                            focusedLabelColor = FocusBlue,
+                                            unfocusedLabelColor = MutedText
+                                        )
+                                    )
+
+                                    // Visual Date & Time selector
+                                    Column {
+                                        Text("Event Date & Time:", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .background(LighterSlate.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                                .border(1.dp, LighterSlate, RoundedCornerShape(8.dp))
+                                                .clickable {
+                                                    showDateTimePicker(contextForPicker, newEventTime) {
+                                                        newEventTime = it
+                                                    }
+                                                }
+                                                .padding(12.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = dateFormat.format(Date(newEventTime)),
+                                                color = SoftWhite,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Icon(
+                                                imageVector = Icons.Default.CalendarToday,
+                                                contentDescription = "Select Time",
+                                                tint = FocusBlue,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            },
+                            confirmButton = {
+                                Button(
+                                    onClick = {
+                                        if (newEventTitle.isNotBlank()) {
+                                            viewModel.addCalendarEvent(newEventTitle, newEventDesc, newEventTime)
+                                            showAddEventDialog = false
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = FocusBlue)
+                                ) {
+                                    Text("Add to Calendar", color = Color.White)
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showAddEventDialog = false }) {
+                                    Text("Cancel", color = MutedText)
+                                }
+                            },
+                            containerColor = SlateCard
+                        )
+                    }
+
+                    // Dialog 2: Customize Imported Task Dialog
+                    if (selectedEventToImport != null) {
+                        val event = selectedEventToImport!!
+                        var importTitle by remember(event.id) { mutableStateOf(event.title) }
+                        var importDesc by remember(event.id) { mutableStateOf(event.description ?: "Imported from Google Calendar.") }
+                        var importPriority by remember(event.id) { mutableStateOf(6.0) }
+                        var importEstMinutes by remember(event.id) { mutableStateOf("30") }
+                        var importEnergy by remember(event.id) { mutableStateOf("MEDIUM") }
+                        val contextForPicker = LocalContext.current
+
+                        AlertDialog(
+                            onDismissRequest = { selectedEventToImport = null },
+                            title = { Text("Customize Imported Task", fontWeight = FontWeight.Bold, color = SoftWhite) },
+                            text = {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    OutlinedTextField(
+                                        value = importTitle,
+                                        onValueChange = { importTitle = it },
+                                        label = { Text("Task Title") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = FocusBlue,
+                                            unfocusedBorderColor = LighterSlate,
+                                            focusedLabelColor = FocusBlue,
+                                            unfocusedLabelColor = MutedText
+                                        )
+                                    )
+                                    OutlinedTextField(
+                                        value = importDesc,
+                                        onValueChange = { importDesc = it },
+                                        label = { Text("Description") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = FocusBlue,
+                                            unfocusedBorderColor = LighterSlate,
+                                            focusedLabelColor = FocusBlue,
+                                            unfocusedLabelColor = MutedText
+                                        )
+                                    )
+                                    
+                                    // Priority Slider
+                                    Column {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text("Task Priority Index:", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                            Text(String.format(Locale.US, "%.1f", importPriority), color = FocusBlue, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                                        }
+                                        Slider(
+                                            value = importPriority.toFloat(),
+                                            onValueChange = { importPriority = it.toDouble() },
+                                            valueRange = 1f..10f,
+                                            steps = 90,
+                                            colors = SliderDefaults.colors(
+                                                thumbColor = FocusBlue,
+                                                activeTrackColor = FocusBlue,
+                                                inactiveTrackColor = LighterSlate
+                                            )
+                                        )
+                                    }
+
+                                    // Estimated minutes
+                                    OutlinedTextField(
+                                        value = importEstMinutes,
+                                        onValueChange = { importEstMinutes = it.filter { char -> char.isDigit() } },
+                                        label = { Text("Estimated Duration (Minutes)") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = FocusBlue,
+                                            unfocusedBorderColor = LighterSlate,
+                                            focusedLabelColor = FocusBlue,
+                                            unfocusedLabelColor = MutedText
+                                        )
+                                    )
+
+                                    // Energy Required choice
+                                    Column {
+                                        Text("Energy Required:", color = MutedText, style = MaterialTheme.typography.bodySmall)
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            listOf("LOW", "MEDIUM", "HIGH").forEach { level ->
+                                                val isSelected = importEnergy == level
+                                                OutlinedButton(
+                                                    onClick = { importEnergy = level },
+                                                    colors = ButtonDefaults.outlinedButtonColors(
+                                                        containerColor = if (isSelected) FocusBlue.copy(alpha = 0.15f) else Color.Transparent,
+                                                        contentColor = if (isSelected) FocusBlue else MutedText
+                                                    ),
+                                                    border = BorderStroke(1.dp, if (isSelected) FocusBlue else LighterSlate),
+                                                    modifier = Modifier.weight(1f)
+                                                ) {
+                                                    Text(level, style = MaterialTheme.typography.bodySmall)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Text(
+                                        text = "Due Date: " + dateFormat.format(Date(event.startMillis)),
+                                        color = AmberYellow,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            },
+                            confirmButton = {
+                                Button(
+                                    onClick = {
+                                        if (importTitle.isNotBlank()) {
+                                            viewModel.importCalendarEventAsTask(
+                                                event = event.copy(title = importTitle, description = importDesc),
+                                                priority = importPriority,
+                                                estimatedMinutes = importEstMinutes.toIntOrNull() ?: 30,
+                                                energyRequired = importEnergy
+                                            )
+                                            selectedEventToImport = null
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = FocusBlue)
+                                ) {
+                                    Text("Confirm & Schedule", color = Color.White)
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { selectedEventToImport = null }) {
+                                    Text("Cancel", color = MutedText)
+                                }
+                            },
+                            containerColor = SlateCard
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // 2. Background Alarm / WhatsApp-Style Notifications Section
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(LighterSlate.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                            .border(1.dp, LighterSlate, RoundedCornerShape(12.dp))
+                            .padding(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.NotificationsActive,
+                                    contentDescription = "Notifications",
+                                    tint = RescueOrange,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        "WhatsApp-Style Realtime Alerts",
+                                        color = SoftWhite,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        if (hasNotificationPermission) "Background service active" else "Inactive",
+                                        color = if (hasNotificationPermission) SuccessGreen else MutedText,
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            }
+                            Switch(
+                                checked = hasNotificationPermission,
+                                onCheckedChange = { checked ->
+                                    if (checked) {
+                                        onRequestNotificationPermission()
+                                    } else {
+                                        viewModel.setNotificationPermissionSimulated(false)
+                                    }
+                                },
+                                colors = SwitchDefaults.colors(checkedThumbColor = RescueOrange)
+                            )
+                        }
+
+                        if (hasNotificationPermission) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(SuccessGreen.copy(alpha = 0.08f), RoundedCornerShape(8.dp))
+                                    .padding(8.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.CheckCircle,
+                                    contentDescription = "Success",
+                                    tint = SuccessGreen,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "WhatsApp-style background push alarms are fully active. High priority notifications will show even when app is closed.",
+                                    color = SuccessGreen,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(
+                                onClick = { onRequestNotificationPermission() },
+                                colors = ButtonDefaults.buttonColors(containerColor = RescueOrange),
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text("Enable Background Push Alerts", color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // 3. Security Section (End-to-End Encryption)
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -1326,6 +2405,72 @@ fun AnalyticsTab(viewModel: LifesaverViewModel) {
                             Text("End-to-End Cloud Encryption", color = SoftWhite, style = MaterialTheme.typography.bodySmall)
                         }
                         Switch(checked = true, onCheckedChange = {}, colors = SwitchDefaults.colors(checkedThumbColor = FocusBlue))
+                    }
+                }
+            }
+        }
+
+        // Gemini API Configuration
+        item {
+            val customApiKey by viewModel.customApiKey.collectAsState()
+            var apiKeyInput by remember { mutableStateOf(customApiKey) }
+            val isUsingPlaceholder = viewModel.isUsingPlaceholderApiKey()
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = SlateCard),
+                border = BorderStroke(1.dp, if (isUsingPlaceholder) SafetyRed else LighterSlate)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "GEMINI AI API CONFIGURATION",
+                            color = if (isUsingPlaceholder) SafetyRed else FocusBlue,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isUsingPlaceholder) SafetyRed.copy(alpha = 0.1f) else SuccessGreen.copy(alpha = 0.1f))
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = if (isUsingPlaceholder) "Key Required" else "Active",
+                                color = if (isUsingPlaceholder) SafetyRed else SuccessGreen,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "When installed on your physical device, the default development API key is omitted for security. To enable the AI Scheduler, Decision Engine, and Deadline Rescue, please enter your own Gemini API Key below.",
+                        color = MutedText,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = apiKeyInput,
+                        onValueChange = { apiKeyInput = it },
+                        label = { Text("Gemini API Key", color = MutedText) },
+                        placeholder = { Text("AIzaSy...", color = MutedText.copy(alpha = 0.5f)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = SoftWhite)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = { viewModel.updateCustomApiKey(apiKeyInput.trim()) },
+                        colors = ButtonDefaults.buttonColors(containerColor = if (isUsingPlaceholder) SleekPrimary else SuccessGreen),
+                        modifier = Modifier.align(Alignment.End),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Save API Key", color = Color.White)
                     }
                 }
             }

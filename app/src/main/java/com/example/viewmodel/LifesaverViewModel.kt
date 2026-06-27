@@ -24,6 +24,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import com.example.data.GoogleCalendarEvent
+import com.example.data.GoogleCalendarSyncHelper
 import java.util.Calendar
 
 class LifesaverViewModel(
@@ -79,6 +81,10 @@ class LifesaverViewModel(
     private val _rescueResult = MutableStateFlow<RescueModeOutput?>(null)
     val rescueResult = _rescueResult.asStateFlow()
 
+    // --- Custom Gemini API Key State ---
+    private val _customApiKey = MutableStateFlow("")
+    val customApiKey = _customApiKey.asStateFlow()
+
     // --- Pomodoro Focus Timer State ---
     private val _activeFocusTask = MutableStateFlow<Task?>(null)
     val activeFocusTask = _activeFocusTask.asStateFlow()
@@ -96,8 +102,17 @@ class LifesaverViewModel(
     val currentBreakActivity = _currentBreakActivity.asStateFlow()
 
     private var timerJob: Job? = null
+    private var autoScheduleJob: Job? = null
 
     init {
+        // Load API key from SharedPreferences
+        try {
+            val sharedPrefs = application.getSharedPreferences("lifesaver_prefs", android.content.Context.MODE_PRIVATE)
+            _customApiKey.value = sharedPrefs.getString("gemini_api_key", "") ?: ""
+        } catch (e: Exception) {
+            _customApiKey.value = ""
+        }
+
         // Initialize User Profile if not existing
         viewModelScope.launch {
             val current = repository.getUserProfile()
@@ -105,6 +120,23 @@ class LifesaverViewModel(
                 repository.insertUserProfile(UserProfile())
             }
         }
+    }
+
+    fun updateCustomApiKey(key: String) {
+        _customApiKey.value = key
+        try {
+            val sharedPrefs = getApplication<Application>().getSharedPreferences("lifesaver_prefs", android.content.Context.MODE_PRIVATE)
+            sharedPrefs.edit().putString("gemini_api_key", key).apply()
+            _systemMessage.value = if (key.isNotEmpty()) "Gemini API key saved!" else "Gemini API key cleared!"
+        } catch (e: Exception) {
+            _systemMessage.value = "Error saving API key: ${e.message}"
+        }
+    }
+
+    fun isUsingPlaceholderApiKey(): Boolean {
+        if (_customApiKey.value.isNotEmpty()) return false
+        val key = com.example.BuildConfig.GEMINI_API_KEY
+        return key.isEmpty() || key == "MY_GEMINI_API_KEY"
     }
 
     fun clearSystemMessage() {
@@ -140,6 +172,57 @@ class LifesaverViewModel(
             
             // Auto schedule daily assistant whenever a task is added
             triggerAutoSchedule()
+        }
+    }
+
+    fun addNewTaskDetailed(
+        title: String,
+        description: String,
+        deadlineMillis: Long,
+        energyRequired: String,
+        priority: Double,
+        estimatedMinutes: Int
+    ) {
+        viewModelScope.launch {
+            val newTask = Task(
+                title = title,
+                description = description,
+                deadline = deadlineMillis,
+                priorityScore = priority,
+                estimatedTimeMinutes = estimatedMinutes,
+                energyRequired = energyRequired,
+                microStepsJson = "[]"
+            )
+            repository.insertTask(newTask)
+            _systemMessage.value = "Task '$title' added manually."
+            triggerAutoSchedule()
+        }
+    }
+
+    fun updateTaskDetails(
+        taskId: Int,
+        title: String,
+        description: String,
+        priority: Double,
+        estimatedMinutes: Int,
+        energyRequired: String,
+        deadlineMillis: Long
+    ) {
+        viewModelScope.launch {
+            val existingTask = repository.getTaskById(taskId)
+            if (existingTask != null) {
+                val updated = existingTask.copy(
+                    title = title,
+                    description = description,
+                    priorityScore = priority,
+                    estimatedTimeMinutes = estimatedMinutes,
+                    energyRequired = energyRequired,
+                    deadline = deadlineMillis
+                )
+                repository.updateTask(updated)
+                _systemMessage.value = "Task '$title' updated."
+                triggerAutoSchedule()
+            }
         }
     }
 
@@ -249,7 +332,9 @@ class LifesaverViewModel(
     // --- AI Scheduling Agent ---
 
     fun triggerAutoSchedule() {
-        viewModelScope.launch {
+        autoScheduleJob?.cancel() // Cancel any pending auto-schedule request
+        autoScheduleJob = viewModelScope.launch {
+            delay(3000) // Debounce rapid user edits or successive events by 3 seconds for rate limit safety
             _isScheduling.value = true
             try {
                 val explanation = repository.generateDailySchedule()
@@ -267,15 +352,63 @@ class LifesaverViewModel(
     // --- AI Decision Engine ("What should I do now?") ---
 
     fun computeNextOptimalAction() {
+        if (_isDecisionLoading.value) return // Prevent duplicate overlapping requests
         viewModelScope.launch {
             _isDecisionLoading.value = true
             try {
+                // Check if there are no active (incomplete) tasks left in the app
+                val activeTasks = tasksState.value.filter { it.status != "COMPLETED" }
+                if (activeTasks.isEmpty()) {
+                    // Check for tasks on the calendar
+                    val events = _calendarEvents.value
+                    if (events.isNotEmpty()) {
+                        val currentEpoch = System.currentTimeMillis()
+                        // Filter out any calendar events that have already been imported as tasks in our app
+                        val existingTaskTitles = tasksState.value.map { it.title.lowercase().trim() }.toSet()
+                        val unimportedEvents = events.filter { it.title.lowercase().trim() !in existingTaskTitles }
+                        
+                        if (unimportedEvents.isNotEmpty()) {
+                            // Find future/not overdue calendar events
+                            val futureEvents = unimportedEvents.filter { it.startMillis >= currentEpoch }
+                            val candidates = if (futureEvents.isNotEmpty()) futureEvents else unimportedEvents
+                            
+                            // Get the closest (earliest start time) and smallest (shortest duration)
+                            val closestEvent = candidates.minByOrNull { it.startMillis }
+                            val smallestEvent = candidates.minByOrNull { it.endMillis - it.startMillis }
+                            
+                            // Select either the closest or smallest event. Prefer closest, fallback to smallest.
+                            val selectedEvent = closestEvent ?: smallestEvent
+                            if (selectedEvent != null) {
+                                // Adjust the priority of this closest or smallest task to maximum (10.0)
+                                val estMinutes = ((selectedEvent.endMillis - selectedEvent.startMillis) / 60000L).toInt().coerceIn(15, 120)
+                                val newTask = Task(
+                                    title = selectedEvent.title,
+                                    description = selectedEvent.description ?: "Auto-imported from Google Calendar.",
+                                    deadline = selectedEvent.startMillis,
+                                    energyRequired = "MEDIUM",
+                                    priorityScore = 10.0, // Maximum Priority!
+                                    estimatedTimeMinutes = estMinutes,
+                                    microStepsJson = "[]"
+                                )
+                                repository.insertTask(newTask)
+                                _systemMessage.value = "Let's tackle your calendar: Imported '${selectedEvent.title}' with Maximum Priority!"
+                                
+                                // Give database a short moment to propagate the insertion
+                                delay(300)
+                            }
+                        }
+                    }
+                }
+
                 val result = repository.selectBestNextTask()
                 if (result != null) {
                     _decisionResult.value = result
                     
                     // Automatically prep focus mode timers
-                    val task = tasksState.value.find { it.id == result.task_id }
+                    var task = tasksState.value.find { it.id == result.task_id }
+                    if (task == null) {
+                        task = repository.getTaskById(result.task_id)
+                    }
                     if (task != null) {
                         _activeFocusTask.value = task
                         _focusTimeLeftSeconds.value = result.focus_session_minutes * 60L
@@ -297,6 +430,7 @@ class LifesaverViewModel(
     // --- Smart Deadline Rescue Mode ---
 
     fun startDeadlineRescueMode(taskId: Int) {
+        if (_isRescueLoading.value) return // Prevent duplicate overlapping requests
         viewModelScope.launch {
             _isRescueLoading.value = true
             try {
@@ -412,6 +546,106 @@ class LifesaverViewModel(
             if (level == "RESCUE") {
                 startDeadlineRescueMode(firstTask.id)
             }
+        }
+    }
+
+    // --- Google Calendar & Notification Permissions ---
+
+    private val _calendarEvents = MutableStateFlow<List<GoogleCalendarEvent>>(emptyList())
+    val calendarEvents: StateFlow<List<GoogleCalendarEvent>> = _calendarEvents.asStateFlow()
+
+    private val _hasCalendarPermission = MutableStateFlow(false)
+    val hasCalendarPermission: StateFlow<Boolean> = _hasCalendarPermission.asStateFlow()
+
+    private val _hasNotificationPermission = MutableStateFlow(false)
+    val hasNotificationPermission: StateFlow<Boolean> = _hasNotificationPermission.asStateFlow()
+
+    fun checkAndLoadCalendar() {
+        val context = getApplication<Application>().applicationContext
+        val hasPerm = GoogleCalendarSyncHelper.hasCalendarPermission(context)
+        _hasCalendarPermission.value = hasPerm
+        if (hasPerm) {
+            loadCalendarEvents()
+        } else {
+            // If local permission check fails, still fetch mock events as reliable development fallback!
+            loadCalendarEvents()
+        }
+    }
+
+    private val customSimulatedEvents = mutableListOf<GoogleCalendarEvent>()
+
+    fun loadCalendarEvents() {
+        viewModelScope.launch {
+            val context = getApplication<Application>().applicationContext
+            val events = GoogleCalendarSyncHelper.fetchSyncedCalendarEvents(context)
+            _calendarEvents.value = customSimulatedEvents + events
+        }
+    }
+
+    fun addCalendarEvent(title: String, description: String, startMillis: Long) {
+        viewModelScope.launch {
+            val context = getApplication<Application>().applicationContext
+            val endMillis = startMillis + 3600000L // 1 hour duration
+            val successReal = GoogleCalendarSyncHelper.insertCalendarEvent(context, title, description, startMillis, endMillis)
+            val newEvent = GoogleCalendarEvent(
+                id = System.currentTimeMillis(),
+                title = title,
+                startMillis = startMillis,
+                endMillis = endMillis,
+                description = description,
+                calendarName = if (successReal) "Google Calendar (Synced)" else "Google Calendar (Local)"
+            )
+            customSimulatedEvents.add(0, newEvent)
+            loadCalendarEvents()
+            _systemMessage.value = "Event '$title' added to Google Calendar!"
+        }
+    }
+
+    fun setCalendarPermissionSimulated(granted: Boolean) {
+        _hasCalendarPermission.value = granted
+        if (granted) {
+            loadCalendarEvents()
+        } else {
+            _calendarEvents.value = emptyList()
+        }
+    }
+
+    fun checkNotificationPermission() {
+        val context = getApplication<Application>().applicationContext
+        val hasPerm = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context,
+                "android.permission.POST_NOTIFICATIONS"
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+        _hasNotificationPermission.value = hasPerm
+    }
+
+    fun setNotificationPermissionSimulated(granted: Boolean) {
+        _hasNotificationPermission.value = granted
+    }
+
+    fun importCalendarEventAsTask(
+        event: GoogleCalendarEvent,
+        priority: Double = 6.0,
+        estimatedMinutes: Int = 30,
+        energyRequired: String = "MEDIUM"
+    ) {
+        viewModelScope.launch {
+            val newTask = Task(
+                title = event.title,
+                description = event.description ?: "Imported from Google Calendar.",
+                deadline = event.startMillis,
+                energyRequired = energyRequired,
+                priorityScore = priority,
+                estimatedTimeMinutes = estimatedMinutes,
+                microStepsJson = "[]"
+            )
+            repository.insertTask(newTask)
+            _systemMessage.value = "Imported '${event.title}' as an active task!"
+            triggerAutoSchedule()
         }
     }
 }

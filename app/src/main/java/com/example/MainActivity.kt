@@ -19,6 +19,7 @@ class MainActivity : ComponentActivity() {
 
     val database = AppDatabase.getDatabase(applicationContext)
     val repository = LifesaverRepository(
+        applicationContext,
         database.taskDao(),
         database.scheduleBlockDao(),
         database.userProfileDao(),
