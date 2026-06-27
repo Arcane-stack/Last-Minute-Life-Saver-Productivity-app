@@ -229,23 +229,35 @@ fun DashboardTab(viewModel: LifesaverViewModel, onNavigateToFocus: () -> Unit) {
                     .fillMaxWidth()
                     .padding(vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Bottom
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text(
-                        text = "PROACTIVE AI ACTIVE",
-                        color = SleekPrimary,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.2.sp,
-                        modifier = Modifier.padding(bottom = 2.dp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Image(
+                        painter = painterResource(id = R.drawable.img_app_logo_1782595618728),
+                        contentDescription = "Lifesaver Logo",
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(1.5.dp, SleekPrimary, RoundedCornerShape(12.dp)),
+                        contentScale = ContentScale.Crop
                     )
-                    Text(
-                        text = "Good afternoon, ${userProfile?.name ?: "Alex"}",
-                        color = SleekText,
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "LIFESAVER AI ACTIVE",
+                            color = SleekPrimary,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.2.sp,
+                            modifier = Modifier.padding(bottom = 2.dp)
+                        )
+                        Text(
+                            text = "Good afternoon, ${userProfile?.name ?: "Alex"}",
+                            color = SleekText,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
                 Box(
                     modifier = Modifier
@@ -2305,7 +2317,7 @@ fun AnalyticsTab(
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    // 2. Background Alarm / WhatsApp-Style Notifications Section
+                    // 2. Background Alarm / Push Notification Section
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2328,7 +2340,7 @@ fun AnalyticsTab(
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Column {
                                     Text(
-                                        "WhatsApp-Style Realtime Alerts",
+                                        "Push Notification Alerts",
                                         color = SoftWhite,
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.Bold
@@ -2361,21 +2373,21 @@ fun AnalyticsTab(
                                     .fillMaxWidth()
                                     .background(SuccessGreen.copy(alpha = 0.08f), RoundedCornerShape(8.dp))
                                     .padding(8.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.CheckCircle,
-                                    contentDescription = "Success",
-                                    tint = SuccessGreen,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "WhatsApp-style background push alarms are fully active. High priority notifications will show even when app is closed.",
-                                    color = SuccessGreen,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
+                             ) {
+                                 Icon(
+                                     Icons.Default.CheckCircle,
+                                     contentDescription = "Success",
+                                     tint = SuccessGreen,
+                                     modifier = Modifier.size(16.dp)
+                                 )
+                                 Spacer(modifier = Modifier.width(8.dp))
+                                 Text(
+                                     text = "Push notification background alarms are fully active. High priority notifications will show even when app is closed.",
+                                     color = SuccessGreen,
+                                     style = MaterialTheme.typography.labelSmall,
+                                     fontWeight = FontWeight.SemiBold
+                                 )
+                             }
                         } else {
                             Spacer(modifier = Modifier.height(8.dp))
                             Button(
