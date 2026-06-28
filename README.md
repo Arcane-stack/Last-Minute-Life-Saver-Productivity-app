@@ -46,6 +46,53 @@ Since this APK is being distributed through GitHub and not the Google Play Store
 * Open your **Downloads** folder.
 * Tap the downloaded `LastMinuteLifeSaver.apk`.
 * Select **Install** and wait for the installation to complete.
+* Go to the **Analytics** section in the app
+* Put your **Gemini API Key** in the Gemini API configuration at the **Bottom**
+  # 🔑 How to Get a Free Gemini API Key
+
+**Last Minute Life Saver** uses Google's Gemini AI to power some of its features. To use these AI features, you'll need a free Gemini API key.
+
+### Step 1: Open Google AI Studio
+
+Go to: **https://aistudio.google.com/**
+
+### Step 2: Sign in
+
+Sign in using your Google account.
+
+### Step 3: Open the API Keys Page
+
+Once you're signed in:
+
+* Click **Get API Key** (or **API Keys**) from the menu.
+* Select **Create API Key**.
+
+### Step 4: Create Your API Key
+
+* Choose **Create API key in a new project** (recommended), or select an existing Google Cloud project if one is available.
+* Wait a few seconds for the key to be generated.
+
+### Step 5: Copy Your API Key
+
+Click the **Copy** button next to the generated API key.
+
+> ⚠️ **Important:** Treat your API key like a password. Don't share it publicly or upload it to GitHub.
+
+### Step 6: Paste the API Key into the App
+
+* Open **Last Minute Life Saver**.
+* Go to the **Settings** or **API Key** section.
+* Paste your copied Gemini API key into the input field.
+* Save the changes.
+
+You're all set! 🎉 The app can now use Gemini AI features.
+
+---
+
+### Need Help?
+
+If you encounter any issues while creating your API key, refer to the official Google AI Studio documentation or contact the project author through this GitHub repository.
+
 
 ## 4. Launch the App
 
