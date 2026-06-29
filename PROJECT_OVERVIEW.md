@@ -1,16 +1,13 @@
-# Project Overview: Lifesaver (Overcoming Procrastination)
+Project Overview:Last-Minute Lifesaver
 
----
-
-## 1. Problem Statement Selected
-
-### Procrastination, Task Paralysis, and Executive Dysfunction
-Procrastination is not simply a matter of poor time management or laziness; modern psychological research defines it as a coping mechanism for emotional distress, anxiety, and task-related dread. When faced with large, complex, or ambiguous tasks, individuals often experience **task paralysis**—a state of executive dysfunction where the barrier to entry feels insurmountably high, leading to avoidance behavior.
-
+1. Problem Statement Selected
+Problem Statement 1 - The Last-Minute Life Saver 
+Students, professionals, and entrepreneurs frequently miss deadlines, assignments, meetings, bill payments, interviews, and important commitments. Existing productivity tools often rely on passive reminders that are easy to ignore and do little to help users actually complete their tasks. 
 Traditional productivity tools and "to-do lists" exacerbate this issue:
-- **Static Checklists:** They present daunting, monolithic tasks (e.g., "Write Research Paper") without showing *how* to begin, which increases cognitive friction.
-- **Tone-Deaf Scheduling:** They set rigid calendar reminders that ignore the user’s fluctuating energy levels, leading to guilt and further avoidance.
-- **Passive Alarm Systems:** Standard notifications are easily swiped away, offering no actual support or intervention when procrastination occurs.
+Static Checklists: They present daunting, monolithic tasks (e.g., "Write Research Paper") without showing how to begin, which increases cognitive friction.
+Tone-Deaf Scheduling: They set rigid calendar reminders that ignore the user’s fluctuating energy levels, leading to guilt and further avoidance.
+Passive Alarm Systems: Standard notifications are easily swiped away, offering no actual support or intervention when procrastination occurs.
+
 
 ---
 
