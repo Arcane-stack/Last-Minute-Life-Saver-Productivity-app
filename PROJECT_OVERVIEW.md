@@ -1,7 +1,7 @@
-Project Overview:Last-Minute Lifesaver
+## Project Overview:Last-Minute Lifesaver
 
-1. Problem Statement Selected
-Problem Statement 1 - The Last-Minute Life Saver 
+### 1. Problem Statement Selected
+**Problem Statement 1 - The Last-Minute Life Saver**
 Students, professionals, and entrepreneurs frequently miss deadlines, assignments, meetings, bill payments, interviews, and important commitments. Existing productivity tools often rely on passive reminders that are easy to ignore and do little to help users actually complete their tasks. 
 Traditional productivity tools and "to-do lists" exacerbate this issue:
 Static Checklists: They present daunting, monolithic tasks (e.g., "Write Research Paper") without showing how to begin, which increases cognitive friction.
